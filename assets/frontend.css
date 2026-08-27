@@ -1,0 +1,71 @@
+.wp-newslatter-campaigns-form .wp-newslatter-campaigns-message,
+.garilla-signup .wp-newslatter-campaigns-message {
+  flex-basis: 100%;
+  order: 20;
+  width: 100%;
+  margin-top: 4px;
+  color: var(--garilla-pink, #e3107c);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.wp-newslatter-campaigns-form .wp-newslatter-campaigns-message[hidden],
+.garilla-signup .wp-newslatter-campaigns-message[hidden],
+.wp-newslatter-campaigns-form .wp-newslatter-campaigns-message:empty,
+.garilla-signup .wp-newslatter-campaigns-message:empty {
+  display: none;
+}
+
+.wp-newslatter-campaigns-form.is-submitting button[type="submit"],
+.garilla-signup.is-submitting button[type="submit"] {
+  cursor: wait;
+  opacity: 0.74;
+}
+
+.garilla-footer-signup .wp-newslatter-campaigns-form .wp-newslatter-campaigns-consent,
+.garilla-footer-signup .garilla-signup .wp-newslatter-campaigns-consent {
+  grid-column: 1 / -1;
+  order: 8;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  max-width: 430px;
+  margin: -8px 0 0;
+  color: var(--garilla-deep, #74114d);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: left;
+}
+.garilla-footer-signup .wp-newslatter-campaigns-form .wp-newslatter-campaigns-consent input[type="checkbox"],
+.garilla-footer-signup .garilla-signup .wp-newslatter-campaigns-consent input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--garilla-pink, #e3107c);
+}
+
+.wp-newslatter-campaigns-lists {
+  flex-basis: 100%;
+  display: grid;
+  gap: 6px;
+  margin: 4px 0;
+  padding: 10px 12px;
+  border: 1px solid #d7dce5;
+  border-radius: 12px;
+}
+.wp-newslatter-campaigns-lists legend {
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.wp-newslatter-campaigns-lists label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
