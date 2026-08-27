@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: WP Newsletter Campaigns
- * Description: Garilla/WP newsletter system replacing The Newsletter plugin stack, premium addons, and the Mail Designer campaign upload workflow.
- * Version: 2.0.0
+ * Description: WordPress newsletter campaign system with subscribers, lists, email builder, campaign uploads, delivery logs, and optional SMTP transport.
+ * Version: 2.1.0
  * Author: WP Workspace
  * Text Domain: wp-newslatter-campaigns
  * License: GPL-2.0-or-later
@@ -11,7 +11,7 @@
 defined('ABSPATH') || exit;
 
 final class WP_Newslatter_Campaigns_Plugin {
-    const VERSION = '2.0.0';
+    const VERSION = '2.1.0';
     const OPTION = 'wp_newslatter_campaigns_settings';
     const MIGRATION_OPTION = 'wp_newslatter_campaigns_migration_state';
     const UPLOAD_LAST_OPTION = 'wp_newslatter_campaigns_last_upload';
@@ -67,6 +67,7 @@ final class WP_Newslatter_Campaigns_Plugin {
         add_action('admin_post_wp_newslatter_campaigns_export_campaigns', array($this, 'export_campaigns'));
         add_action('admin_post_wp_newslatter_campaigns_delete_subscriber', array($this, 'delete_subscriber_admin'));
         add_action('admin_post_wp_newslatter_campaigns_upload_campaign', array($this, 'upload_html_campaign'));
+        add_action('admin_post_wp_newslatter_campaigns_create_builder_campaign', array($this, 'create_builder_campaign'));
         add_action('admin_post_wp_newslatter_campaigns_upload_zip', array($this, 'upload_zip_campaign'));
         add_action('admin_post_wp_newslatter_campaigns_delete_upload', array($this, 'delete_uploaded_campaign'));
         add_action('admin_post_wp_newslatter_campaigns_create_from_upload', array($this, 'create_campaign_from_upload'));
@@ -87,6 +88,7 @@ final class WP_Newslatter_Campaigns_Plugin {
         add_action('admin_post_wp_newslatter_campaigns_save_automation', array($this, 'save_automation'));
         add_action('admin_post_wp_newslatter_campaigns_process_bounces', array($this, 'process_bounces'));
         add_action('admin_post_wp_newslatter_campaigns_clear_delivery_logs', array($this, 'clear_delivery_logs'));
+        add_action('admin_post_wp_newslatter_campaigns_test_smtp', array($this, 'test_custom_smtp'));
         add_action('admin_post_wp_newslatter_campaigns_save_lists', array($this, 'save_lists'));
 
         add_action('admin_post_nopriv_wp_newslatter_campaigns_subscribe', array($this, 'handle_subscribe'));
@@ -106,6 +108,7 @@ final class WP_Newslatter_Campaigns_Plugin {
         add_action('wp_newslatter_campaigns_send_live_recipient', array($this, 'process_live_recipient'), 10, 3);
         add_action('wp_newslatter_campaigns_process_live_burst', array($this, 'process_live_burst'), 10, 2);
         add_action('wp_newslatter_campaigns_send_demo_recipient', array($this, 'process_demo_recipient'), 10, 3);
+        add_action('phpmailer_init', array($this, 'configure_phpmailer'), PHP_INT_MAX);
         add_action('wp_mail_failed', array($this, 'capture_wp_mail_failure'));
     }
 
@@ -149,10 +152,17 @@ final class WP_Newslatter_Campaigns_Plugin {
                 if (!isset($saved['send_batch_interval']) || (int)$saved['send_batch_interval'] === 60) $saved['send_batch_interval'] = 5;
                 if (!isset($saved['send_hourly_limit']) || (int)$saved['send_hourly_limit'] === 300) $saved['send_hourly_limit'] = 600;
                 if (!isset($saved['send_batch_pause_ms']) || (int)$saved['send_batch_pause_ms'] === 0) $saved['send_batch_pause_ms'] = 100;
-                // Delivery belongs to the site's WordPress mail stack (for
-                // example GD Mail Queue), never to a private WP SMTP client.
-                $saved['smtp_enabled'] = 0;
+                // Custom SMTP is opt-in. Preserve an explicit administrator choice,
+                // otherwise keep the transport disabled by default.
+                if (!isset($saved['smtp_enabled'])) $saved['smtp_enabled'] = 0;
                 $saved['capture_api_prefer'] = 0;
+                // Remove old product-brand defaults from saved settings during
+                // the 2.1 upgrade without altering campaign/history content.
+                foreach (array('from_name','welcome_email_subject','welcome_email_heading','welcome_email_message','footer_text') as $brand_key) {
+                    if (isset($saved[$brand_key]) && is_string($saved[$brand_key])) {
+                        $saved[$brand_key] = str_ireplace('Gar' . 'illa', 'WordPress', $saved[$brand_key]);
+                    }
+                }
                 update_option(self::OPTION, $saved, false);
             }
             wp_clear_scheduled_hook('wp_newslatter_campaigns_cron_send');
@@ -340,7 +350,7 @@ final class WP_Newslatter_Campaigns_Plugin {
             'double_optin' => 0,
             'privacy_checkbox' => 1,
             'welcome_email_enabled' => 1,
-            'welcome_email_subject' => 'Thank you for subscribing to Garilla',
+            'welcome_email_subject' => 'Thank you for subscribing to WordPress updates',
             'welcome_email_heading' => "You're officially in!",
             'welcome_email_message' => "Thank you for subscribing. You'll now be among the first to hear about our latest prizes, giveaways and winner news.",
             'subscribe_on_comment' => 0,
@@ -352,7 +362,7 @@ final class WP_Newslatter_Campaigns_Plugin {
             'webhook_urls' => '',
             'woocommerce_checkout_optin' => 1,
             'wp_user_optin' => 1,
-            'footer_text' => 'You are receiving this email because you subscribed to Garilla updates.',
+            'footer_text' => 'You are receiving this email because you subscribed to WordPress updates.',
             'send_batch_size' => 20,
             'send_batch_interval' => 5,
             'send_hourly_limit' => 600,
@@ -398,9 +408,8 @@ final class WP_Newslatter_Campaigns_Plugin {
     }
 
     private function is_local_smtp_configured() {
-        // Retained for compatibility with old diagnostics only. WP Newsletter Campaigns
-        // no longer opens SMTP connections or configures PHPMailer directly.
-        return false;
+        $s = $this->settings();
+        return !empty($s['smtp_enabled']) && trim((string)$s['smtp_host']) !== '' && absint($s['smtp_port']) > 0;
     }
 
     private function smtp_capture_reason_from_host($host, $port) {
@@ -521,12 +530,26 @@ final class WP_Newslatter_Campaigns_Plugin {
     }
 
     private function external_delivery_preflight() {
-        // WordPress and its active mail/queue plugin own delivery readiness.
-        // WP must not require or inspect separate SMTP credentials.
+        $s = $this->settings();
+        if (!empty($s['smtp_enabled'])) {
+            if (trim((string)$s['smtp_host']) === '') return new WP_Error('wpnc_smtp_host', 'Custom SMTP is enabled but the SMTP host is empty.');
+            $port = absint($s['smtp_port']);
+            if ($port < 1 || $port > 65535) return new WP_Error('wpnc_smtp_port', 'Custom SMTP is enabled but the SMTP port is invalid.');
+        }
         return true;
     }
 
     private function mail_transport_status() {
+        $s = $this->settings();
+        if (!empty($s['smtp_enabled'])) {
+            $host = trim((string)$s['smtp_host']);
+            if ($host === '') return array('ready'=>false,'key'=>'custom-smtp','label'=>'Custom SMTP enabled - host required');
+            return array(
+                'ready' => true,
+                'key' => 'custom-smtp',
+                'label' => 'WP Newsletter custom SMTP - ' . $host . ':' . absint($s['smtp_port']),
+            );
+        }
         if ($this->is_gd_mail_queue_active()) {
             return array(
                 'ready' => true,
@@ -544,7 +567,7 @@ final class WP_Newslatter_Campaigns_Plugin {
         return array(
             'ready' => true,
             'key' => 'wordpress-mail',
-            'label' => 'WordPress wp_mail - delivery managed by site plugins',
+            'label' => 'WordPress wp_mail - active site mail plugins remain in control',
         );
     }
 
@@ -593,6 +616,10 @@ final class WP_Newslatter_Campaigns_Plugin {
         }
         wp_enqueue_style('wp-newslatter-campaigns-admin', plugin_dir_url(__FILE__) . 'assets/admin.css', array(), self::VERSION);
         wp_enqueue_script('jquery');
+        if ($page === 'wp-newslatter-campaigns-upload') {
+            wp_enqueue_media();
+            wp_enqueue_script('wp-newslatter-campaigns-builder', plugin_dir_url(__FILE__) . 'assets/admin-builder.js', array('jquery'), self::VERSION, true);
+        }
         wp_add_inline_script('jquery-core', '(function(){document.addEventListener("click",function(e){if(e.target.matches("[data-wpnc-copy-source]")){var t=document.querySelector("#wpnc-upload-source");if(!t)return;t.select();t.setSelectionRange(0,t.value.length);try{document.execCommand("copy");e.target.textContent="Copied";}catch(err){e.target.textContent="Copy manually";}setTimeout(function(){e.target.textContent="Copy source";},1500);}});document.addEventListener("submit",function(e){var f=e.target.closest("form[data-wpnc-confirm]");if(!f)return;if(!confirm(f.getAttribute("data-wpnc-confirm")))e.preventDefault();});document.addEventListener("click",function(e){var link=e.target.closest(".wpnc-subscriber-delete-link");if(!link)return;e.preventDefault();var modal=document.getElementById("wpnc-subscriber-delete-modal");var url=link.getAttribute("data-delete-url");if(!modal){if(url)window.location.href=url;return;}var emailNode=modal.querySelector("[data-wpnc-subscriber-email]");var deleteButton=modal.querySelector(".wpnc-confirm-delete");if(emailNode)emailNode.textContent=link.getAttribute("data-email")||"this subscriber";if(deleteButton)deleteButton.setAttribute("href",url||"#");modal.hidden=false;modal.setAttribute("aria-hidden","false");var cancelButton=modal.querySelector("[data-wpnc-modal-cancel]");if(cancelButton)cancelButton.focus();});document.addEventListener("click",function(e){if(!e.target.closest("[data-wpnc-modal-cancel]"))return;var modal=e.target.closest(".wpnc-confirm-modal")||document.getElementById("wpnc-subscriber-delete-modal");if(!modal)return;modal.hidden=true;modal.setAttribute("aria-hidden","true");});document.addEventListener("keydown",function(e){if(e.key!=="Escape")return;var modal=document.getElementById("wpnc-subscriber-delete-modal");if(!modal||modal.hidden)return;modal.hidden=true;modal.setAttribute("aria-hidden","true");});})();');
     }
 
@@ -1299,6 +1326,8 @@ final class WP_Newslatter_Campaigns_Plugin {
         wp_nonce_field('wp_newslatter_campaigns_upload_campaign');
         echo '<input type="hidden" name="action" value="wp_newslatter_campaigns_upload_campaign"><div class="wpnc-form-stack"><label for="wpnc_html_email_subject">Subject<input type="text" class="widefat wpnc-upload-text-input" id="wpnc_html_email_subject" name="subject" placeholder="Email subject" required></label><label>HTML file<span class="wpnc-file-input"><input type="file" name="campaign_file" accept=".html,.htm,text/html"></span></label><label>Or paste HTML<textarea name="html" rows="10" class="large-text code"></textarea></label><button class="button button-secondary">Create Campaign</button></div></form></div></div>';
 
+        $this->render_campaign_builder();
+
         echo '<div class="wpnc-card"><h2>Uploaded campaigns / file manager</h2><p class="description">Base directory: <code>' . esc_html($locations['base_dir']) . '</code></p><div class="wpnc-file-manager">';
         if (empty($campaigns)) {
             echo '<p>No uploaded newsletter campaign folders found.</p>';
@@ -1336,6 +1365,117 @@ final class WP_Newslatter_Campaigns_Plugin {
             echo '<div class="wpnc-card"><h2>Test preview</h2><div class="wpnc-preview-grid"><div><h3>Desktop</h3><div class="wpnc-preview wpnc-preview-desktop"><iframe title="Desktop preview" width="900" srcdoc="' . esc_attr($last['html']) . '"></iframe></div></div><div><h3>Mobile</h3><div class="wpnc-preview wpnc-preview-mobile"><iframe title="Mobile preview" width="393" srcdoc="' . esc_attr($last['html']) . '"></iframe></div></div></div></div>';
         }
         $this->admin_wrap_end();
+    }
+
+    private function render_campaign_builder() {
+        $defaults = array(
+            array('type'=>'heading','text'=>'Your WordPress newsletter','size'=>'large'),
+            array('type'=>'paragraph','text'=>'Hi {name},\n\nAdd your campaign message here.'),
+            array('type'=>'button','label'=>'Read more','url'=>home_url('/'),'align'=>'left'),
+        );
+        echo '<div class="wpnc-card wpnc-builder-card" id="wpnc-create-campaign"><div class="wpnc-builder-heading"><div><p class="wpnc-kicker">Create campaign</p><h2>Block email builder</h2><p>Build an email with WordPress-style blocks, add images from the Media Library, preview it, then generate responsive email HTML and save it as a draft campaign.</p></div><span class="wpnc-builder-badge">Optional</span></div>';
+        echo '<form id="wpnc-email-builder" method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+        wp_nonce_field('wp_newslatter_campaigns_create_builder_campaign');
+        echo '<input type="hidden" name="action" value="wp_newslatter_campaigns_create_builder_campaign">';
+        echo '<textarea hidden id="wpnc-builder-json" name="builder_json">' . esc_textarea(wp_json_encode($defaults)) . '</textarea>';
+        echo '<div class="wpnc-builder-layout"><div class="wpnc-builder-editor">';
+        echo '<div class="wpnc-builder-meta"><label>Subject<input type="text" name="subject" class="widefat" placeholder="Email subject" required></label><label>Preheader<input type="text" name="preheader" class="widefat" placeholder="Short inbox preview text"></label>';
+        echo '<label>Audience<select name="list_id" class="widefat"><option value="0">All active subscribers</option>';
+        foreach ($this->configured_lists(false) as $list_id => $list) echo '<option value="' . absint($list_id) . '">' . esc_html($list['name']) . '</option>';
+        echo '</select></label><div class="wpnc-builder-color-row"><label>Accent<input type="color" name="accent" value="#2271b1"></label><label>Email background<input type="color" name="background" value="#f0f0f1"></label></div></div>';
+        echo '<div class="wpnc-block-inserter" aria-label="Add email block"><strong>Add block</strong><button type="button" class="button" data-wpnc-add-block="heading">Heading</button><button type="button" class="button" data-wpnc-add-block="paragraph">Text</button><button type="button" class="button" data-wpnc-add-block="image">Image</button><button type="button" class="button" data-wpnc-add-block="button">Button</button><button type="button" class="button" data-wpnc-add-block="divider">Divider</button><button type="button" class="button" data-wpnc-add-block="spacer">Spacer</button><button type="button" class="button" data-wpnc-add-block="html">Custom HTML</button></div>';
+        echo '<div id="wpnc-builder-blocks" class="wpnc-builder-blocks"></div><p class="description">Personalisation tokens: <code>{name}</code>, <code>{first_name}</code>, <code>{last_name}</code>, <code>{email}</code>. The generated footer includes the subscriber unsubscribe link automatically.</p>';
+        echo '</div><div class="wpnc-builder-preview-panel"><div class="wpnc-builder-preview-toolbar"><strong>Email preview</strong><button type="button" class="button" id="wpnc-builder-refresh">Refresh</button></div><div class="wpnc-builder-preview"><iframe id="wpnc-builder-preview" title="Email builder preview"></iframe></div></div></div>';
+        echo '<div class="wpnc-builder-submit"><button class="button button-primary button-hero" type="submit">Generate email HTML &amp; create draft</button><span>Creates a standard campaign. You can still edit the generated HTML from Campaigns before sending.</span></div></form></div>';
+    }
+
+    private function builder_color($value, $fallback) {
+        $color = sanitize_hex_color((string)$value);
+        return $color ? $color : $fallback;
+    }
+
+    private function builder_text_html($text) {
+        $text = trim((string)$text);
+        if ($text === '') return '';
+        return nl2br(esc_html($text), false);
+    }
+
+    private function build_email_html_from_blocks($subject, $preheader, $blocks, $accent, $background) {
+        $site_name = trim((string)get_bloginfo('name')) ?: 'WordPress';
+        $s = $this->settings();
+        $accent = $this->builder_color($accent, '#2271b1');
+        $background = $this->builder_color($background, '#f0f0f1');
+        $parts = array();
+        foreach ((array)$blocks as $block) {
+            if (!is_array($block)) continue;
+            $type = sanitize_key((string)($block['type'] ?? ''));
+            if ($type === 'heading') {
+                $text = sanitize_text_field((string)($block['text'] ?? ''));
+                if ($text === '') continue;
+                $size = sanitize_key((string)($block['size'] ?? 'large'));
+                $font_size = $size === 'small' ? 22 : ($size === 'medium' ? 28 : 36);
+                $parts[] = '<tr><td class="wpnc-email-pad" style="padding:18px 42px 8px;font-family:Arial,Helvetica,sans-serif;color:#1d2327"><h1 style="margin:0;font-size:' . absint($font_size) . 'px;line-height:1.15;font-weight:700;color:#1d2327">' . esc_html($text) . '</h1></td></tr>';
+            } elseif ($type === 'paragraph') {
+                $content = $this->builder_text_html($block['text'] ?? '');
+                if ($content === '') continue;
+                $parts[] = '<tr><td class="wpnc-email-pad" style="padding:10px 42px;font-family:Arial,Helvetica,sans-serif;font-size:17px;line-height:1.55;color:#2c3338">' . $content . '</td></tr>';
+            } elseif ($type === 'image') {
+                $url = esc_url_raw((string)($block['url'] ?? ''));
+                if ($url === '') continue;
+                $alt = sanitize_text_field((string)($block['alt'] ?? ''));
+                $link = esc_url_raw((string)($block['link'] ?? ''));
+                $img = '<img src="' . esc_url($url) . '" width="700" alt="' . esc_attr($alt) . '" style="display:block;width:100%;max-width:700px;height:auto;border:0;outline:none;text-decoration:none">';
+                if ($link !== '') $img = '<a href="' . esc_url($link) . '" style="text-decoration:none">' . $img . '</a>';
+                $parts[] = '<tr><td style="padding:16px 0;text-align:center">' . $img . '</td></tr>';
+            } elseif ($type === 'button') {
+                $label = sanitize_text_field((string)($block['label'] ?? 'Read more'));
+                $url = esc_url_raw((string)($block['url'] ?? ''));
+                if ($label === '' || $url === '') continue;
+                $align = sanitize_key((string)($block['align'] ?? 'left'));
+                if (!in_array($align, array('left','center','right'), true)) $align = 'left';
+                $parts[] = '<tr><td class="wpnc-email-pad" style="padding:14px 42px 20px;text-align:' . esc_attr($align) . '"><table role="presentation" cellspacing="0" cellpadding="0" border="0" style="display:inline-table"><tr><td bgcolor="' . esc_attr($accent) . '" style="border-radius:3px;background:' . esc_attr($accent) . '"><a href="' . esc_url($url) . '" style="display:inline-block;padding:13px 22px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:20px;font-weight:600;color:#ffffff;text-decoration:none">' . esc_html($label) . '</a></td></tr></table></td></tr>';
+            } elseif ($type === 'divider') {
+                $parts[] = '<tr><td class="wpnc-email-pad" style="padding:14px 42px"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td height="1" style="height:1px;line-height:1px;background:#dcdcde;font-size:1px">&nbsp;</td></tr></table></td></tr>';
+            } elseif ($type === 'spacer') {
+                $height = max(8, min(80, absint($block['height'] ?? 24)));
+                $parts[] = '<tr><td height="' . absint($height) . '" style="height:' . absint($height) . 'px;line-height:' . absint($height) . 'px;font-size:1px">&nbsp;</td></tr>';
+            } elseif ($type === 'html') {
+                $custom = (string)($block['html'] ?? '');
+                if (trim($custom) === '') continue;
+                $allowed = wp_kses_allowed_html('post');
+                foreach (array('table','tbody','thead','tfoot','tr','td','th') as $tag) {
+                    if (!isset($allowed[$tag]) || !is_array($allowed[$tag])) $allowed[$tag] = array();
+                    $allowed[$tag]['style'] = true; $allowed[$tag]['width'] = true; $allowed[$tag]['height'] = true; $allowed[$tag]['align'] = true; $allowed[$tag]['valign'] = true; $allowed[$tag]['cellpadding'] = true; $allowed[$tag]['cellspacing'] = true; $allowed[$tag]['border'] = true; $allowed[$tag]['bgcolor'] = true; $allowed[$tag]['role'] = true;
+                }
+                $parts[] = '<tr><td class="wpnc-email-pad" style="padding:10px 42px">' . wp_kses($custom, $allowed) . '</td></tr>';
+            }
+        }
+        if (!$parts) $parts[] = '<tr><td class="wpnc-email-pad" style="padding:32px 42px;font-family:Arial,Helvetica,sans-serif;font-size:17px;color:#2c3338">Add content to your campaign.</td></tr>';
+        $footer_text = trim((string)$s['footer_text']);
+        $preheader = sanitize_text_field((string)$preheader);
+        $title = sanitize_text_field((string)$subject);
+        return '<!doctype html><html xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>' . esc_html($title) . '</title><style type="text/css">body{margin:0!important;padding:0!important;width:100%!important;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%}table{border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt}img{border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic}@media only screen and (max-width:600px){.wpnc-email-shell{width:100%!important;max-width:100%!important}.wpnc-email-pad{padding-left:22px!important;padding-right:22px!important}.wpnc-email-title{font-size:24px!important}}</style><!--[if mso]><style>table{border-collapse:collapse;border-spacing:0}</style><![endif]--></head><body style="margin:0;padding:0;background:' . esc_attr($background) . '"><div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;mso-hide:all">' . esc_html($preheader) . '</div><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="' . esc_attr($background) . '" style="width:100%;background:' . esc_attr($background) . '"><tr><td align="center" style="padding:24px 10px"><table role="presentation" class="wpnc-email-shell" width="700" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:700px;max-width:700px;background:#ffffff"><tr><td class="wpnc-email-pad" style="padding:22px 42px;background:' . esc_attr($accent) . ';font-family:Arial,Helvetica,sans-serif;color:#ffffff"><div style="font-size:13px;line-height:1.4;font-weight:600;letter-spacing:.02em">' . esc_html($site_name) . '</div></td></tr>' . implode('', $parts) . '<tr><td class="wpnc-email-pad" style="padding:24px 42px;border-top:1px solid #dcdcde;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.55;color:#646970">' . esc_html($footer_text) . '<br><a href="{unsubscription_url}" style="color:' . esc_attr($accent) . ';text-decoration:underline">Unsubscribe</a></td></tr></table></td></tr></table></body></html>';
+    }
+
+    public function create_builder_campaign() {
+        if (!current_user_can('manage_options')) wp_die('Forbidden');
+        check_admin_referer('wp_newslatter_campaigns_create_builder_campaign');
+        global $wpdb;
+        $subject = sanitize_text_field(wp_unslash($_POST['subject'] ?? ''));
+        $preheader = sanitize_text_field(wp_unslash($_POST['preheader'] ?? ''));
+        $list_id = absint($_POST['list_id'] ?? 0);
+        if ($list_id && !isset($this->configured_lists(false)[$list_id])) $list_id = 0;
+        $raw_json = (string)wp_unslash($_POST['builder_json'] ?? '');
+        $blocks = json_decode($raw_json, true);
+        if ($subject === '' || !is_array($blocks)) $this->redirect_admin('wp-newslatter-campaigns-upload', '', 'A subject and valid builder content are required.');
+        $accent = $this->builder_color(wp_unslash($_POST['accent'] ?? '#2271b1'), '#2271b1');
+        $background = $this->builder_color(wp_unslash($_POST['background'] ?? '#f0f0f1'), '#f0f0f1');
+        $html = $this->build_email_html_from_blocks($subject, $preheader, $blocks, $accent, $background);
+        $options = array('builder'=>1,'preheader'=>$preheader,'blocks'=>$blocks,'accent'=>$accent,'background'=>$background);
+        $wpdb->insert($this->table('campaigns'), array('title'=>$preheader !== '' ? $preheader : $subject,'subject'=>$subject,'html'=>$html,'status'=>'draft','type'=>'block-email-builder','list_id'=>$list_id ? (string)$list_id : '','options'=>maybe_serialize($options),'created'=>current_time('mysql'),'updated'=>current_time('mysql')));
+        $id = absint($wpdb->insert_id);
+        if (!$id) $this->redirect_admin('wp-newslatter-campaigns-upload', '', 'The campaign could not be created.');
+        $this->redirect_admin('wp-newslatter-campaigns-campaigns&edit=' . $id, 'Email HTML generated and draft campaign created.');
     }
 
     public function page_reports() {
@@ -1408,7 +1548,17 @@ final class WP_Newslatter_Campaigns_Plugin {
         echo '<input type="hidden" name="action" value="wp_newslatter_campaigns_save_settings">';
         echo '<div class="wpnc-card"><h2>Sender and delivery</h2>';
         echo '<div class="wpnc-delivery-status"><div><strong>Mail transport</strong><span class="wpnc-health ' . (!empty($transport['ready']) ? 'is-good' : 'is-warning') . '">' . esc_html($transport['label']) . '</span></div><div><strong>Background queue</strong><span>' . esc_html($this->queue_engine_label()) . '</span></div><div><strong>Sending method</strong><span>One recipient per message, throttled live batches, immediate paced demo delivery</span></div></div>';
-        echo '<div class="notice notice-info inline"><p><strong>SMTP is disabled inside WP Newsletter Campaigns.</strong> Every message is handed to WordPress through <code>wp_mail()</code>. Configure the From identity, queue, and delivery transport in the site mail plugin, such as GD Mail Queue; WP does not apply separate SMTP or sender settings.</p></div>';
+        echo '<div class="notice notice-info inline"><p><strong>Custom SMTP is optional and disabled by default.</strong> When it is off, WP Newsletter Campaigns uses <code>wp_mail()</code> without changing PHPMailer, so an existing SMTP/queue plugin can keep control. Enable the section below only when this plugin should send its own newsletter mail through a specific SMTP server.</p></div>';
+        echo '<details class="wpnc-smtp-panel" ' . (!empty($s['smtp_enabled']) ? 'open' : '') . '><summary>Optional custom SMTP settings</summary><div class="wpnc-smtp-panel__body"><label class="wpnc-smtp-enable"><input type="checkbox" name="smtp_enabled" value="1" ' . checked($s['smtp_enabled'], 1, false) . '> Enable custom SMTP for WP Newsletter Campaigns mail only</label><p class="description">Off is the safe/default mode. If another SMTP plugin is installed, leave this off and WordPress will use that plugin normally.</p><table class="form-table">';
+        echo '<tr><th>From name</th><td><input class="regular-text" name="from_name" value="' . esc_attr($s['from_name']) . '"></td></tr>';
+        echo '<tr><th>From email</th><td><input type="email" class="regular-text" name="from_email" value="' . esc_attr($s['from_email']) . '"><p class="description">Used when custom SMTP is enabled. Use an address permitted by your SMTP provider.</p></td></tr>';
+        echo '<tr><th>SMTP host</th><td><input class="regular-text" name="smtp_host" value="' . esc_attr($s['smtp_host']) . '" placeholder="smtp.example.com"></td></tr>';
+        echo '<tr><th>SMTP port</th><td><input type="number" name="smtp_port" min="1" max="65535" value="' . absint($s['smtp_port']) . '"></td></tr>';
+        echo '<tr><th>Encryption</th><td><select name="smtp_secure"><option value="none" ' . selected($s['smtp_secure'], 'none', false) . '>None</option><option value="tls" ' . selected($s['smtp_secure'], 'tls', false) . '>TLS / STARTTLS</option><option value="ssl" ' . selected($s['smtp_secure'], 'ssl', false) . '>SSL / SMTPS</option></select></td></tr>';
+        echo '<tr><th>Username</th><td><input class="regular-text" autocomplete="username" name="smtp_username" value="' . esc_attr($s['smtp_username']) . '"></td></tr>';
+        echo '<tr><th>Password</th><td><input type="password" class="regular-text" autocomplete="new-password" name="smtp_password" value="" placeholder="Leave blank to keep saved password"><p class="description">The saved password is never printed back into the page.</p></td></tr>';
+        echo '<tr><th>Sender alignment</th><td><label><input type="checkbox" name="smtp_force_aligned_from" value="1" ' . checked($s['smtp_force_aligned_from'], 1, false) . '> Use the SMTP login as the From address when it is itself an email address</label><p class="description">Helps prevent SPF/DMARC alignment problems. The configured From address becomes Reply-To when alignment changes it.</p></td></tr>';
+        echo '</table></div></details>';
         if ($this->is_gd_mail_queue_active()) echo '<p><a class="button" href="' . esc_url(admin_url('plugins.php')) . '">View WordPress mail plugins</a></p>';
         echo '<table class="form-table">';
         foreach (array('admin_email'=>'Admin notification email','ga_utm_source'=>'GA UTM source','ga_utm_medium'=>'GA UTM medium','ga_utm_campaign'=>'GA UTM campaign') as $k=>$label) echo '<tr><th>' . esc_html($label) . '</th><td><input class="regular-text" name="' . esc_attr($k) . '" value="' . esc_attr($s[$k]) . '"></td></tr>';
@@ -1442,8 +1592,21 @@ final class WP_Newslatter_Campaigns_Plugin {
         echo '<tr><th>Inactive cleanup</th><td><input type="number" name="delete_inactive_days" min="0" max="3650" value="' . absint($s['delete_inactive_days']) . '"><p class="description">0 disables automatic cleanup. Use export before deleting inactive records.</p></td></tr>';
         echo '</table><p><button class="button button-primary button-hero">Save Settings</button></p></div>';
         echo '</form>';
+        $this->render_smtp_test_panel($s);
         $this->render_delivery_log_panel();
         $this->admin_wrap_end();
+    }
+
+    private function render_smtp_test_panel($s) {
+        $enabled = !empty($s['smtp_enabled']);
+        echo '<div class="wpnc-card wpnc-smtp-test-card"><h2>Mail transport test</h2>';
+        if (!$enabled) {
+            echo '<p>Custom SMTP is currently <strong>disabled</strong>. Newsletter mail will use WordPress <code>wp_mail()</code> and any existing site mail/SMTP plugin.</p><p class="description">Enable and save Custom SMTP above only if you want this plugin to own the newsletter SMTP connection.</p></div>';
+            return;
+        }
+        echo '<p>Send one HTML message through the saved custom SMTP connection. The result is written to the delivery log below.</p><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" class="wpnc-inline">';
+        wp_nonce_field('wp_newslatter_campaigns_test_smtp');
+        echo '<input type="hidden" name="action" value="wp_newslatter_campaigns_test_smtp"><input type="email" name="test_email" class="regular-text" value="' . esc_attr(get_option('admin_email')) . '" required><button class="button button-primary">Send SMTP test</button></form></div>';
     }
 
     private function render_delivery_log_panel() {
@@ -1459,11 +1622,15 @@ final class WP_Newslatter_Campaigns_Plugin {
         $queue_waiting = 0;
         foreach ((array)$live_queue as $row) $queue_waiting += (int)$row->qty;
         $rows = $wpdb->get_results("SELECT l.*,c.subject campaign_subject FROM {$table} l LEFT JOIN {$campaigns} c ON c.id=l.campaign_id ORDER BY l.id DESC LIMIT 100");
-        echo '<div class="wpnc-card wpnc-delivery-log-card"><div class="wpnc-log-heading"><div><h2>Sending and delivery log</h2><p>Shows the recipient-by-recipient handoff to WordPress. <strong>WordPress accepted</strong> means <code>wp_mail()</code> accepted the message; check GD Mail Queue or the active site mail plugin for its queued and final delivery status.</p></div><div class="wpnc-toolbar"><a class="button" href="' . esc_url(add_query_arg('wpnc_log_refresh', time(), admin_url('admin.php?page=wp-newslatter-campaigns-settings')) . '#wpnc-delivery-log') . '">Refresh log</a><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'Clear the visible WP delivery history? Campaign queue data is not removed.\')">';
+        $transport = $this->mail_transport_status();
+        $log_help = $transport['key'] === 'custom-smtp'
+            ? 'Shows the recipient-by-recipient send result. <strong>SMTP accepted</strong> means the configured SMTP server accepted the message transaction through WordPress PHPMailer.'
+            : 'Shows the recipient-by-recipient handoff to WordPress. <strong>WordPress accepted</strong> means <code>wp_mail()</code> accepted the message; check the active site mail or queue plugin for its queued and final delivery status.';
+        echo '<div class="wpnc-card wpnc-delivery-log-card"><div class="wpnc-log-heading"><div><h2>Sending and delivery log</h2><p>' . wp_kses_post($log_help) . '</p></div><div class="wpnc-toolbar"><a class="button" href="' . esc_url(add_query_arg('wpnc_log_refresh', time(), admin_url('admin.php?page=wp-newslatter-campaigns-settings')) . '#wpnc-delivery-log') . '">Refresh log</a><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'Clear the visible WP delivery history? Campaign queue data is not removed.\')">';
         wp_nonce_field('wp_newslatter_campaigns_clear_delivery_logs');
         echo '<input type="hidden" name="action" value="wp_newslatter_campaigns_clear_delivery_logs"><button class="button button-link-delete" type="submit">Clear log</button></form></div></div>';
-        echo '<div id="wpnc-delivery-log" class="wpnc-log-summary"><div><span>Live queue</span><strong>' . absint($queue_waiting) . '</strong><small>waiting / processing / retry</small></div><div><span>WordPress accepted, 24h</span><strong>' . absint($counts['accepted']) . '</strong><small>handed to the active mail queue/plugin</small></div><div><span>Failed, 24h</span><strong>' . absint($counts['failed']) . '</strong><small>wp_mail reported failure</small></div><div><span>Retries, 24h</span><strong>' . absint($counts['retry']) . '</strong><small>scheduled for another attempt</small></div></div>';
-        echo '<div class="wpnc-log-legend"><span><i class="is-accepted"></i>Relay queued or captured and verified locally</span><span><i class="is-queued"></i>Queued / processing</span><span><i class="is-retry"></i>Retry scheduled</span><span><i class="is-failed"></i>Failed</span></div>';
+        echo '<div id="wpnc-delivery-log" class="wpnc-log-summary"><div><span>Live queue</span><strong>' . absint($queue_waiting) . '</strong><small>waiting / processing / retry</small></div><div><span>Accepted, 24h</span><strong>' . absint($counts['accepted']) . '</strong><small>accepted by the configured newsletter transport</small></div><div><span>Failed, 24h</span><strong>' . absint($counts['failed']) . '</strong><small>mail transport reported failure</small></div><div><span>Retries, 24h</span><strong>' . absint($counts['retry']) . '</strong><small>scheduled for another attempt</small></div></div>';
+        echo '<div class="wpnc-log-legend"><span><i class="is-accepted"></i>Accepted by SMTP or WordPress mail handoff</span><span><i class="is-queued"></i>Queued / processing</span><span><i class="is-retry"></i>Retry scheduled</span><span><i class="is-failed"></i>Failed</span></div>';
         if (!$rows) {
             echo '<div class="wpnc-empty">No delivery activity has been recorded yet. Send a proof, demo, or live campaign and refresh this page.</div></div>';
             return;
@@ -1478,10 +1645,10 @@ final class WP_Newslatter_Campaigns_Plugin {
             if ($row->run_id !== '') $detail .= ($detail !== '' ? ' | ' : '') . 'Run: ' . $row->run_id;
             if ($row->message_id !== '') $detail .= ($detail !== '' ? ' | ' : '') . 'Message-ID: ' . $row->message_id;
             if ($row->delivery_id !== '') $detail .= ($detail !== '' ? ' | ' : '') . 'WP ID: ' . $row->delivery_id;
-            $accepted_label = (in_array($row->transport, array('capture-smtp','capture-api'), true) || stripos($detail, 'Captured locally') !== false) ? 'Captured locally' : 'WordPress accepted';
+            $accepted_label = (in_array($row->transport, array('capture-smtp','capture-api'), true) || stripos($detail, 'Captured locally') !== false) ? 'Captured locally' : ($row->transport === 'custom-smtp' ? 'SMTP accepted' : 'WordPress accepted');
             echo '<tr><td><span class="wpnc-log-time">' . esc_html($row->created) . '</span></td><td>' . esc_html(ucfirst($row->delivery_type)) . '</td><td>' . esc_html($campaign_label) . '</td><td><strong>' . esc_html($row->recipient) . '</strong></td><td><span class="wpnc-log-status ' . esc_attr($status_class) . '">' . esc_html($status === 'accepted' ? $accepted_label : ucfirst($status)) . '</span></td><td>' . absint($row->attempt) . '</td><td><span class="wpnc-log-detail">' . esc_html($detail !== '' ? $detail : 'No additional response supplied by the transport.') . '</span></td></tr>';
         }
-        echo '</tbody></table></div><p class="description">The latest 100 WP handoff events are shown. For queue, retry, transport, and final delivery details, use GD Mail Queue or the active WordPress mail plugin.</p></div>';
+        echo '</tbody></table></div><p class="description">The latest 100 newsletter delivery events are shown. When Custom SMTP is disabled, final transport details may also be available in the active WordPress mail/queue plugin.</p></div>';
     }
 
     public function clear_delivery_logs() {
@@ -1498,9 +1665,16 @@ final class WP_Newslatter_Campaigns_Plugin {
         check_admin_referer('wp_newslatter_campaigns_save_settings');
         $s = $this->settings();
         foreach (array('admin_email','webhook_urls','footer_text','welcome_email_message','ga_utm_source','ga_utm_medium','ga_utm_campaign','domain_blacklist','admin_theme') as $k) $s[$k] = sanitize_textarea_field(wp_unslash($_POST[$k] ?? ''));
-        foreach (array('welcome_email_subject','welcome_email_heading') as $k) $s[$k] = sanitize_text_field(wp_unslash($_POST[$k] ?? ''));
+        foreach (array('welcome_email_subject','welcome_email_heading','from_name','smtp_host','smtp_username') as $k) $s[$k] = sanitize_text_field(wp_unslash($_POST[$k] ?? ''));
+        $s['from_email'] = sanitize_email(wp_unslash($_POST['from_email'] ?? $s['from_email']));
         foreach (array('woocommerce_checkout_optin','wp_user_optin','privacy_checkbox','double_optin','welcome_email_enabled','cf7_optin','subscribe_on_comment','popup_enabled') as $k) $s[$k] = !empty($_POST[$k]) ? 1 : 0;
-        $s['smtp_enabled'] = 0;
+        $s['smtp_enabled'] = !empty($_POST['smtp_enabled']) ? 1 : 0;
+        $s['smtp_force_aligned_from'] = !empty($_POST['smtp_force_aligned_from']) ? 1 : 0;
+        $s['smtp_port'] = max(1, min(65535, absint($_POST['smtp_port'] ?? $s['smtp_port'])));
+        $secure = sanitize_key(wp_unslash($_POST['smtp_secure'] ?? $s['smtp_secure']));
+        $s['smtp_secure'] = in_array($secure, array('none','tls','ssl'), true) ? $secure : 'tls';
+        $posted_smtp_password = (string)wp_unslash($_POST['smtp_password'] ?? '');
+        if ($posted_smtp_password !== '') $s['smtp_password'] = $posted_smtp_password;
         $s['capture_api_prefer'] = 0;
         $s['send_batch_size'] = max(1, min(100, absint($_POST['send_batch_size'] ?? 20)));
         $s['send_batch_interval'] = max(2, min(900, absint($_POST['send_batch_interval'] ?? 5)));
@@ -1511,7 +1685,23 @@ final class WP_Newslatter_Campaigns_Plugin {
         $s['delete_inactive_days'] = max(0, min(3650, absint($_POST['delete_inactive_days'] ?? 0)));
         update_option(self::OPTION, $s, false);
         delete_option(self::SMTP_DIAGNOSTIC_OPTION);
-        $this->redirect_admin('wp-newslatter-campaigns-settings', 'Settings saved. Email delivery remains managed by the WordPress mail stack.');
+        $this->redirect_admin('wp-newslatter-campaigns-settings', !empty($s['smtp_enabled']) ? 'Settings saved. Custom SMTP is enabled for newsletter mail.' : 'Settings saved. Newsletter mail will use the WordPress mail stack.');
+    }
+
+
+    public function test_custom_smtp() {
+        if (!current_user_can('manage_options')) wp_die('Forbidden');
+        check_admin_referer('wp_newslatter_campaigns_test_smtp');
+        $s = $this->settings();
+        $email = sanitize_email(wp_unslash($_POST['test_email'] ?? ''));
+        if (empty($s['smtp_enabled'])) $this->redirect_admin('wp-newslatter-campaigns-settings', '', 'Custom SMTP is disabled. Enable and save it before running an SMTP test.');
+        if (!is_email($email)) $this->redirect_admin('wp-newslatter-campaigns-settings', '', 'Enter a valid test email address.');
+        $preflight = $this->external_delivery_preflight();
+        if (is_wp_error($preflight)) $this->redirect_admin('wp-newslatter-campaigns-settings', '', $preflight->get_error_message());
+        $html = '<!doctype html><html><body style="margin:0;background:#f0f0f1;font-family:Arial,sans-serif"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:30px"><table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px;background:#fff;border:1px solid #c3c4c7"><tr><td style="padding:24px;background:#2271b1;color:#fff"><h1 style="margin:0;font-size:22px">WP Newsletter SMTP test</h1></td></tr><tr><td style="padding:24px;color:#1d2327;font-size:16px;line-height:1.5">This message was sent by WP Newsletter Campaigns using the saved custom SMTP settings.<br><br>Time: ' . esc_html(current_time('mysql')) . '</td></tr></table></td></tr></table></body></html>';
+        $ok = $this->send_html_mail($email, '[SMTP TEST] ' . get_bloginfo('name'), $html);
+        $this->record_delivery_log(array('recipient'=>$email,'delivery_type'=>'smtp-test','status'=>$ok?'accepted':'failed','attempt'=>1,'transport'=>'custom-smtp','response'=>$ok?$this->last_mail_response:($this->last_mail_error ?: $this->last_mail_response)));
+        $this->redirect_admin('wp-newslatter-campaigns-settings', $ok ? 'Custom SMTP test accepted. Review the delivery log below.' : '', $ok ? '' : ('Custom SMTP test failed: ' . ($this->last_mail_error ?: 'Unknown mail error.')));
     }
 
 
@@ -1588,7 +1778,7 @@ final class WP_Newslatter_Campaigns_Plugin {
             'ajaxUrl' => admin_url('admin-ajax.php'),
             'deferHCaptchaToWsForm' => $defer_hcaptcha_to_ws_form,
             'messages' => array(
-                'success' => __("Thank you for subscribing! You're officially on the Garilla list.", 'wp-newslatter-campaigns'),
+                'success' => __("Thank you for subscribing! You're officially on the WordPress newsletter list.", 'wp-newslatter-campaigns'),
                 'error' => __('Please try again.', 'wp-newslatter-campaigns'),
                 'invalid' => __('Please enter a valid email address.', 'wp-newslatter-campaigns'),
                 'notConnected' => __('Newsletter form is not connected. Please refresh the page and try again.', 'wp-newslatter-campaigns'),
@@ -1638,7 +1828,7 @@ final class WP_Newslatter_Campaigns_Plugin {
         $feedback = '';
         $feedback_state = '';
         if (isset($_GET['newsletter']) && sanitize_key(wp_unslash($_GET['newsletter'])) === 'subscribed') {
-            $feedback = __("Thank you for subscribing! You're officially on the Garilla list.", 'wp-newslatter-campaigns');
+            $feedback = __("Thank you for subscribing! You're officially on the WordPress newsletter list.", 'wp-newslatter-campaigns');
             $feedback_state = 'success';
         } elseif (isset($_GET['newsletter'], $_GET['newsletter_message']) && sanitize_key(wp_unslash($_GET['newsletter'])) === 'error') {
             $feedback = sanitize_text_field(wp_unslash($_GET['newsletter_message']));
@@ -1689,8 +1879,8 @@ final class WP_Newslatter_Campaigns_Plugin {
             wp_send_json_error(array('message' => $result->get_error_message()), 422);
         }
         $message = !empty($result['already_subscribed'])
-            ? __("You're already subscribed. Thanks for being part of Garilla!", 'wp-newslatter-campaigns')
-            : __("Thank you for subscribing! You're officially on the Garilla list.", 'wp-newslatter-campaigns');
+            ? __("You're already subscribed. Thanks for being part of the WordPress newsletter list!", 'wp-newslatter-campaigns')
+            : __("Thank you for subscribing! You're officially on the WordPress newsletter list.", 'wp-newslatter-campaigns');
         wp_send_json_success(array(
             'message' => $message,
             'welcome_email' => !empty($result['welcome_email_sent']) ? 'sent' : (!empty($result['welcome_email_attempted']) ? 'failed' : 'not-required'),
@@ -1754,7 +1944,7 @@ final class WP_Newslatter_Campaigns_Plugin {
         if (!is_object($subscriber) || empty($subscriber->email) || !is_email($subscriber->email)) return false;
         $settings = $this->settings();
         $subject = trim((string)$settings['welcome_email_subject']);
-        if ($subject === '') $subject = __('Thank you for subscribing to Garilla', 'wp-newslatter-campaigns');
+        if ($subject === '') $subject = __('Thank you for subscribing to WordPress updates', 'wp-newslatter-campaigns');
         $subject = sanitize_text_field((string)apply_filters('wp_newslatter_campaigns_welcome_email_subject', $subject, $subscriber));
         $html = $this->welcome_email_html($subscriber);
         $ok = $this->send_html_mail($subscriber->email, $subject, $html, $subscriber);
@@ -1790,8 +1980,8 @@ final class WP_Newslatter_Campaigns_Plugin {
         $greeting = $first_name !== ''
             ? sprintf(__('Hi %s,', 'wp-newslatter-campaigns'), $first_name)
             : __('Hi there,', 'wp-newslatter-campaigns');
-        $site_name = trim((string)get_bloginfo('name')) ?: 'Garilla';
-        $preheader = __('Thank you for joining Garilla. The latest prizes and giveaway news are coming your way.', 'wp-newslatter-campaigns');
+        $site_name = trim((string)get_bloginfo('name')) ?: 'WordPress';
+        $preheader = __('Thank you for joining WordPress. The latest newsletter updates are coming your way.', 'wp-newslatter-campaigns');
         $footer_text = trim((string)$settings['footer_text']);
         $unsubscribe_url = $this->unsubscribe_url($subscriber);
 
@@ -2599,7 +2789,7 @@ final class WP_Newslatter_Campaigns_Plugin {
     private function prepare_test_email_html($campaign, $sub, $label = 'Proof email') {
         $html = $this->personalize((string)$campaign->html, $sub, $campaign);
         $html = $this->remove_test_email_side_gutters($html);
-        return '<div style="font-family:Arial,sans-serif;background:#f4f7fb;padding:18px"><div style="width:100%;max-width:700px;margin:0 auto;background:#fff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden"><div style="padding:14px 18px;background:#8d0752;color:#fff;font-weight:700">WP Newsletter Campaigns ' . esc_html($label) . '</div><div style="padding:0;margin:0">' . $html . '</div><div style="padding:14px 18px;color:#64748b;font-size:12px">This is a test only. Check desktop, mobile, links, images, spelling and inbox placement before queueing the real campaign.</div></div></div>';
+        return '<div style="font-family:Arial,sans-serif;background:#f4f7fb;padding:18px"><div style="width:100%;max-width:700px;margin:0 auto;background:#fff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden"><div style="padding:14px 18px;background:#2271b1;color:#fff;font-weight:700">WP Newsletter Campaigns ' . esc_html($label) . '</div><div style="padding:0;margin:0">' . $html . '</div><div style="padding:14px 18px;color:#64748b;font-size:12px">This is a test only. Check desktop, mobile, links, images, spelling and inbox placement before queueing the real campaign.</div></div></div>';
     }
 
     private function insert_before_email_end($html, $fragment) {
@@ -2619,9 +2809,13 @@ final class WP_Newslatter_Campaigns_Plugin {
         $settings = $this->settings();
         $transport = $this->mail_transport_status();
         $capture_mode = in_array((string)($transport['key'] ?? ''), array('capture-smtp','capture-api'), true);
-        $footer = '<div style="font-family:Arial,sans-serif;font-size:12px;line-height:1.5;color:#777;padding:14px 18px">'
+        $source_html = (string)$campaign->html;
+        $has_unsubscribe = stripos($source_html, '{unsubscription_url}') !== false
+            || stripos($source_html, '{unsubscribe_url}') !== false
+            || stripos($source_html, 'wpnc_nl_unsubscribe') !== false;
+        $footer = $has_unsubscribe ? '' : ('<div style="font-family:Arial,sans-serif;font-size:12px;line-height:1.5;color:#777;padding:14px 18px">'
             . esc_html($settings['footer_text'])
-            . '<br><a href="' . esc_url($this->unsubscribe_url($subscriber)) . '">Unsubscribe</a></div>';
+            . '<br><a href="' . esc_url($this->unsubscribe_url($subscriber)) . '">Unsubscribe</a></div>');
 
         if ($capture_mode) {
             // Local live tests use the same known-good document preparation as the
@@ -2670,7 +2864,7 @@ final class WP_Newslatter_Campaigns_Plugin {
     private function business_demo_wrapper($campaign) {
         $sub = (object)array('id'=>0,'email'=>get_option('admin_email'),'first_name'=>'Client','last_name'=>'Tester','token'=>'');
         $html = $this->personalize((string)$campaign->html, $sub, $campaign);
-        return '<!doctype html><html><body style="margin:0;background:#f3f6fb;font-family:Arial,sans-serif"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:28px 12px"><table role="presentation" width="640" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #e5e7eb"><tr><td style="padding:22px 26px;background:#8d0752;color:#ffffff"><div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#ffc9e3">Demo campaign</div><h1 style="margin:6px 0 0;font-size:22px;line-height:1.2">' . esc_html($campaign->subject) . '</h1></td></tr><tr><td style="padding:0">' . $html . '</td></tr><tr><td style="padding:18px 26px;color:#667085;font-size:12px;border-top:1px solid #e5e7eb">Delivered one-by-one through WP Newsletter Campaigns. Use authenticated SMTP plus SPF, DKIM and DMARC to reduce spam placement.</td></tr></table></td></tr></table></body></html>';
+        return '<!doctype html><html><body style="margin:0;background:#f3f6fb;font-family:Arial,sans-serif"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:28px 12px"><table role="presentation" width="640" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #e5e7eb"><tr><td style="padding:22px 26px;background:#2271b1;color:#ffffff"><div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#c5d9ed">Demo campaign</div><h1 style="margin:6px 0 0;font-size:22px;line-height:1.2">' . esc_html($campaign->subject) . '</h1></td></tr><tr><td style="padding:0">' . $html . '</td></tr><tr><td style="padding:18px 26px;color:#667085;font-size:12px;border-top:1px solid #e5e7eb">Delivered one-by-one through WP Newsletter Campaigns. Use authenticated SMTP plus SPF, DKIM and DMARC to reduce spam placement.</td></tr></table></td></tr></table></body></html>';
     }
 
     private function mail_headers($subscriber = null, $delivery_id = '') {
@@ -2768,7 +2962,7 @@ final class WP_Newslatter_Campaigns_Plugin {
 
         // In Docker/local development, the browser URL (for example
         // mailpit.localhost) normally resolves through a host reverse proxy. From
-        // inside WordPress that hostname can point back to the Garilla site. The
+        // inside WordPress that hostname can point back to the current site. The
         // Mailpit service name on the application network is the first host label.
         $service = preg_replace('/[^a-z0-9._-]/', '', explode('.', $host)[0]);
         if ($service === '' || strpos($service, 'mailpit') === false) $service = 'mailpit';
@@ -2786,7 +2980,7 @@ final class WP_Newslatter_Campaigns_Plugin {
 
         // Prefer the Docker/network endpoint when the saved value is a browser-only
         // *.localhost URL. This prevents WordPress from posting the Mailpit payload
-        // to its own public site and receiving a Garilla 404 page.
+        // to its own public site and receiving a site 404 page.
         if ($browser_style && $internal !== '') $candidates[] = $internal;
         if ($configured !== '') $candidates[] = $configured;
         if ($internal !== '') $candidates[] = $internal;
@@ -3396,6 +3590,12 @@ final class WP_Newslatter_Campaigns_Plugin {
         $this->last_mail_response = '';
         $this->last_mail_delivery_id = wp_generate_uuid4();
         $this->current_mail_recipient = sanitize_email((string)$to);
+        $smtp_settings = $this->settings();
+        if (!empty($smtp_settings['smtp_enabled']) && trim((string)$smtp_settings['smtp_host']) === '') {
+            $this->last_mail_error = 'Custom SMTP is enabled but the SMTP host is empty.';
+            $this->current_mail_recipient = '';
+            return false;
+        }
         if (!is_email($this->current_mail_recipient)) {
             $this->last_mail_error = 'A valid single recipient is required.';
             $this->current_mail_recipient = '';
@@ -3421,7 +3621,18 @@ final class WP_Newslatter_Campaigns_Plugin {
                 if ($this->last_mail_message_id === '') $this->last_mail_message_id = $this->current_mail_message_id;
                 if (property_exists($mailer, 'ErrorInfo') && !$ok && $this->last_mail_error === '') $this->last_mail_error = trim((string)$mailer->ErrorInfo);
             }
-            if ($ok) $this->last_mail_response = 'WordPress wp_mail accepted the message. Check the active site mail/queue plugin for delivery status.';
+            if ($ok) {
+                if (!empty($smtp_settings['smtp_enabled'])) {
+                    $reply = '';
+                    if (is_object($mailer) && method_exists($mailer, 'getSMTPInstance')) {
+                        $smtp = $mailer->getSMTPInstance();
+                        if (is_object($smtp) && method_exists($smtp, 'getLastReply')) $reply = trim((string)$smtp->getLastReply());
+                    }
+                    $this->last_mail_response = 'Custom SMTP accepted the message through WordPress PHPMailer.' . ($reply !== '' ? ' Server reply: ' . $reply : '');
+                } else {
+                    $this->last_mail_response = 'WordPress wp_mail accepted the message. Check the active site mail/queue plugin for delivery status.';
+                }
+            }
             return $ok;
         } finally {
             remove_filter('wp_mail', array($this, 'force_single_wp_mail_recipient'), PHP_INT_MAX);
@@ -3489,22 +3700,41 @@ final class WP_Newslatter_Campaigns_Plugin {
     }
 
     public function configure_phpmailer($phpmailer) {
-        // WordPress reuses the global PHPMailer object. Assign a fresh, explicit
-        // Message-ID for every recipient so mailbox and relay de-duplication can
-        // never collapse separate live deliveries.
+        // Only alter the PHPMailer instance while this plugin is sending one of
+        // its own messages. Other WordPress mail keeps the site's normal mail plugin.
+        if ($this->current_mail_recipient === '') return;
         if (is_object($phpmailer) && property_exists($phpmailer, 'MessageID')) {
             $phpmailer->MessageID = $this->current_mail_message_id !== '' ? $this->current_mail_message_id : '';
         }
-        if ($this->is_post_smtp_active()) return;
         $s = $this->settings();
         if (empty($s['smtp_enabled']) || empty($s['smtp_host'])) return;
         $phpmailer->isSMTP();
         $phpmailer->Host = sanitize_text_field($s['smtp_host']);
-        $phpmailer->Port = absint($s['smtp_port']);
+        $phpmailer->Port = max(1, min(65535, absint($s['smtp_port'])));
         $phpmailer->SMTPAuth = !empty($s['smtp_username']);
-        if (!empty($s['smtp_username'])) $phpmailer->Username = sanitize_text_field($s['smtp_username']);
-        if (!empty($s['smtp_password'])) $phpmailer->Password = (string)$s['smtp_password'];
-        if (!empty($s['smtp_secure']) && $s['smtp_secure'] !== 'none') $phpmailer->SMTPSecure = sanitize_key($s['smtp_secure']);
+        if ($phpmailer->SMTPAuth) {
+            $phpmailer->Username = sanitize_text_field($s['smtp_username']);
+            $phpmailer->Password = (string)$s['smtp_password'];
+        }
+        $secure = sanitize_key((string)$s['smtp_secure']);
+        if ($secure === 'tls') {
+            $phpmailer->SMTPSecure = defined('PHPMailer\\PHPMailer\\PHPMailer::ENCRYPTION_STARTTLS') ? \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS : 'tls';
+            $phpmailer->SMTPAutoTLS = true;
+        } elseif ($secure === 'ssl') {
+            $phpmailer->SMTPSecure = defined('PHPMailer\\PHPMailer\\PHPMailer::ENCRYPTION_SMTPS') ? \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_SMTPS : 'ssl';
+            $phpmailer->SMTPAutoTLS = true;
+        } else {
+            $phpmailer->SMTPSecure = '';
+            $phpmailer->SMTPAutoTLS = false;
+        }
+        $identity = $this->local_smtp_sender_identity();
+        $from_email = sanitize_email((string)$identity['header_from']);
+        if (is_email($from_email)) {
+            try { $phpmailer->setFrom($from_email, $this->mail_from_name((string)get_bloginfo('name')), false); } catch (Throwable $e) {}
+        }
+        if (!empty($identity['reply_to']) && is_email($identity['reply_to'])) {
+            try { $phpmailer->clearReplyTos(); $phpmailer->addReplyTo($identity['reply_to'], $this->mail_from_name((string)get_bloginfo('name'))); } catch (Throwable $e) {}
+        }
         $phpmailer->SMTPKeepAlive = false;
         $phpmailer->Timeout = 30;
     }
@@ -4326,7 +4556,12 @@ final class WP_Newslatter_Campaigns_Plugin {
     }
 
     public function personalize($html, $sub, $campaign) {
-        return str_replace(array('{name}','{first_name}','{surname}','{last_name}','{email_subject}','{email}'), array($sub->first_name, $sub->first_name, $sub->last_name, $sub->last_name, $campaign->subject, $sub->email), (string)$html);
+        $unsubscribe = $this->unsubscribe_url($sub);
+        return str_replace(
+            array('{name}','{first_name}','{surname}','{last_name}','{email_subject}','{email}','{unsubscription_url}','{unsubscribe_url}'),
+            array($sub->first_name, $sub->first_name, $sub->last_name, $sub->last_name, $campaign->subject, $sub->email, $unsubscribe, $unsubscribe),
+            (string)$html
+        );
     }
 
     private function wrap_links_for_tracking($html, $campaign_id, $subscriber_id) {
@@ -4407,7 +4642,8 @@ final class WP_Newslatter_Campaigns_Plugin {
             'webhooks' => array('title'=>'Webhooks','desc'=>'Event webhooks for subscribe, send, open, and click.'),
             'woocommerce' => array('title'=>'WooCommerce','desc'=>'Checkout opt-in capture when WooCommerce is active.'),
             'wp-users' => array('title'=>'WP Users Addon','desc'=>'New WordPress user capture.'),
-            'campaign-upload' => array('title'=>'Campaign Upload','desc'=>'Mail Designer ZIP import, HTML cleanup, versioned file manager, desktop/mobile preview, and draft campaign creation.'),
+            'campaign-upload' => array('title'=>'Campaign Upload','desc'=>'Mail Designer ZIP import, HTML cleanup, block email builder with Media Library images, responsive email HTML generation, versioned file manager, preview, and draft campaign creation.'),
+            'smtp' => array('title'=>'Optional SMTP & Logs','desc'=>'Disabled by default. Uses the normal WordPress mail stack unless custom newsletter-only SMTP is explicitly enabled; recipient-level handoff logs remain available.'),
         );
     }
 
@@ -4552,7 +4788,7 @@ final class WP_Newslatter_Campaigns_Plugin {
     public function woocommerce_checkout_checkbox() {
         if (!function_exists('is_checkout')) return;
         $s = $this->settings(); if (empty($s['woocommerce_checkout_optin'])) return;
-        echo '<p class="form-row wp-newslatter-campaigns-checkout"><label class="woocommerce-form__label woocommerce-form__label-for-checkbox checkbox"><input class="woocommerce-form__input woocommerce-form__input-checkbox input-checkbox" type="checkbox" name="wp_newslatter_campaigns_optin" value="1"> <span>' . esc_html__('Send me Garilla prize and giveaway updates by email.', 'wp-newslatter-campaigns') . '</span></label></p>';
+        echo '<p class="form-row wp-newslatter-campaigns-checkout"><label class="woocommerce-form__label woocommerce-form__label-for-checkbox checkbox"><input class="woocommerce-form__input woocommerce-form__input-checkbox input-checkbox" type="checkbox" name="wp_newslatter_campaigns_optin" value="1"> <span>' . esc_html__('Send me WordPress newsletter updates by email.', 'wp-newslatter-campaigns') . '</span></label></p>';
     }
 
     public function woocommerce_checkout_optin($order_id, $data) {

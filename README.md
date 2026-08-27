@@ -1,8 +1,15 @@
 # WP Newsletter Campaigns
 
-Native WordPress newsletter system for WP Workspace/Garilla, packaged as a single plugin to replace the current **Newsletter** plugin plus the active Newsletter add-ons and the separate campaign-upload workflow.
+Native WordPress newsletter system, packaged as a single plugin to replace the current **Newsletter** plugin plus the active Newsletter add-ons and the separate campaign-upload workflow.
 
 ## Version
+
+### 2.1.0
+
+- Removes the remaining legacy brand references and switches the admin accent to classic WordPress blue.
+- Adds a Gutenberg-style block email builder with Media Library images and responsive email-HTML generation.
+- Adds optional newsletter-only custom SMTP, disabled by default, with a transport test and delivery-log integration.
+- When custom SMTP is disabled, the plugin leaves WordPress `wp_mail()` and any active site mail/SMTP plugin in control.
 
 ### 2.0.0
 
@@ -51,7 +58,7 @@ Native WordPress newsletter system for WP Workspace/Garilla, packaged as a singl
 - Sends a one-time branded welcome email after a new visitor successfully subscribes through a WP newsletter form.
 - Adds editable welcome-email subject, heading, message, and an enable/disable control in Newsletter Settings.
 - Records welcome-email transport results in the existing delivery log and avoids repeat emails for addresses that are already active subscribers.
-- Exposes template artwork and CTA filters so the Garilla child theme can supply its current logo, mascot, and prizes URL.
+- Exposes template artwork and CTA filters so the WordPress child theme can supply its current logo, mascot, and prizes URL.
 
 ### 1.7.16
 
@@ -82,7 +89,7 @@ Native WordPress newsletter system for WP Workspace/Garilla, packaged as a singl
 
 - Separates the browser Mailpit URL from the server-side API endpoint.
 - Automatically maps `mailpit.localhost` to the Docker/network API URL `http://mailpit:8025`.
-- Retries the internal Mailpit endpoint when a configured browser URL returns the Garilla 404 page or non-JSON content.
+- Retries the internal Mailpit endpoint when a configured browser URL returns the WordPress 404 page or non-JSON content.
 - Uses the same Mailpit API base for sending and stored-message verification, preventing cross-instance verification.
 - Truncates HTML proxy errors in delivery logs and immediately returns failed attempts to `retry` instead of leaving misleading `processing` rows.
 
@@ -356,7 +363,7 @@ wp-newslatter-campaigns/
 
 ### 1.4.0
 
-- Changed the admin accent/dark green UI colour to `#8d0752`.
+- Changed the admin accent/dark green UI colour to `#2271b1`.
 - Improved admin input fields with lighter backgrounds, larger touch-friendly sizing, better padding, rounded corners, and clearer focus states.
 - Updated campaign upload, edit/test, SMTP, and delivery screens to use the new branded controls consistently.
 
@@ -415,3 +422,13 @@ An accepted status means the configured mail transport accepted the message. It 
 
 - Added detection for Mailpit, MailHog, smtp4dev and common local capture endpoints.
 - This release initially blocked campaign sends through capture-only SMTP. Version 1.7.7 supersedes that restriction and allows full local testing with accurate **Captured locally** status.
+
+
+## 2.1 changes
+
+- Removed remaining legacy-brand branding and frontend compatibility selectors; visible branding now uses WordPress terminology.
+- Replaced the cherry-red admin accent with the classic WordPress admin blue palette (`#2271b1`, `#135e96`, and light blue/grey states).
+- Added an optional Gutenberg-style block email builder to Campaign Upload with Heading, Text, Image/Media Library, Button, Divider, Spacer, and Custom HTML blocks plus live preview.
+- Builder output is responsive, table-based email HTML and includes personalisation plus an unsubscribe token.
+- Added optional newsletter-only custom SMTP. It is disabled by default; when disabled the plugin leaves `wp_mail()`/PHPMailer to the existing WordPress mail stack.
+- Added a custom SMTP test action and kept recipient-level delivery logs in Settings.

@@ -4,20 +4,34 @@
 
 - WP Newsletter Campaigns owns subscribers, campaign recipient snapshots, personalisation, unsubscribe handling, campaign progress, throttling, and recipient-level handoff logs.
 - WP Newsletter Campaigns sends one recipient per WordPress `wp_mail()` call.
-- GD Mail Queue, or another mail plugin selected by the site administrator, owns the actual mail queue, provider connection, retries, transport logs, and final delivery diagnostics.
-- WP Newsletter Campaigns does not configure PHPMailer, open SMTP connections, or override the From identity selected by the site mail plugin.
+- By default, GD Mail Queue or another mail plugin selected by the site administrator can own the provider connection, retries, transport logs, and final delivery diagnostics.
+- WP Newsletter Campaigns also has an optional newsletter-only Custom SMTP mode. It is disabled by default and only changes PHPMailer while this plugin is actively sending one of its newsletter messages.
+- If Custom SMTP is disabled, WP Newsletter Campaigns does not alter PHPMailer transport settings, so the normal WordPress mail stack remains in control.
 
-Do not configure SMTP inside WP Newsletter Campaigns. Configure and test delivery in the WordPress mail plugin used by the site.
+Use one transport owner for newsletter delivery: either leave Custom SMTP disabled and configure the site mail plugin, or explicitly enable Custom SMTP in WP Newsletter Campaigns Settings. Avoid enabling competing SMTP transport plugins for the same newsletter send.
 
-## GD Mail Queue
+## GD Mail Queue / existing WordPress mail plugin
 
-1. Install and activate GD Mail Queue.
-2. Configure its queue processing and delivery method in WordPress admin.
-3. Send the mail plugin's own test email and confirm it appears in its queue/log.
-4. Keep WordPress cron or the server-side queue runner active.
-5. Send a WP proof or demo message and verify that GD Mail Queue receives it.
+1. Leave WP Newsletter Campaigns Custom SMTP disabled.
+2. Install and activate GD Mail Queue or the site mail plugin you want to use.
+3. Configure its queue processing and delivery method in WordPress admin.
+4. Send the mail plugin's own test email and confirm it appears in its queue/log.
+5. Keep WordPress cron or the server-side queue runner active.
+6. Send a WP proof or demo message and verify that the mail plugin receives it.
 
 `wp_mail()` success means WordPress or the active queue plugin accepted the message. It does not by itself confirm final inbox delivery, so use the mail plugin's queue and logs for that status.
+
+
+## Optional Custom SMTP
+
+1. Open WP Newsletter Campaigns -> Settings.
+2. Expand **Optional custom SMTP settings**.
+3. Enter the SMTP host, port, encryption, username/password, and sender identity.
+4. Enable **Custom SMTP for WP Newsletter Campaigns mail only** and save.
+5. Use **Mail transport test** to send a test message.
+6. Review the recipient-level Sending and delivery log directly below the settings.
+
+Custom SMTP is opt-in and affects only WP Newsletter Campaigns messages while they are being sent. It does not take over unrelated WordPress emails.
 
 ## Sender authentication
 

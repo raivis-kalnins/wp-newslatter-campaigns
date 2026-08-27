@@ -7,7 +7,7 @@
 
   function allForms() {
     return Array.prototype.slice.call(
-      document.querySelectorAll('form.wp-newslatter-campaigns-form, form.garilla-signup')
+      document.querySelectorAll('form.wp-newslatter-campaigns-form, form.wordpress-signup')
     ).filter(function (form) {
       return form.querySelector('[name="_wp_newslatter_campaigns_nonce"]') ||
         form.querySelector('[name="action"][value="wp_newslatter_campaigns_subscribe"]') ||
