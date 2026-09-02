@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Newsletter Campaigns
  * Description: WordPress newsletter campaign system with subscribers, lists, email builder, campaign uploads, delivery logs, and optional SMTP transport.
- * Version: 2.1.0
+ * Version: 2.1.3
  * Author: WP Workspace
  * Text Domain: wp-newslatter-campaigns
  * License: GPL-2.0-or-later
@@ -11,7 +11,7 @@
 defined('ABSPATH') || exit;
 
 final class WP_Newslatter_Campaigns_Plugin {
-    const VERSION = '2.1.0';
+    const VERSION = '2.1.3';
     const OPTION = 'wp_newslatter_campaigns_settings';
     const MIGRATION_OPTION = 'wp_newslatter_campaigns_migration_state';
     const UPLOAD_LAST_OPTION = 'wp_newslatter_campaigns_last_upload';
@@ -1705,17 +1705,41 @@ final class WP_Newslatter_Campaigns_Plugin {
     }
 
 
+    private function hcaptcha_uses_local_test_credentials() {
+        $host = strtolower((string) wp_parse_url(home_url('/'), PHP_URL_HOST));
+        $host = trim($host, '[]');
+        $is_local = $host === 'localhost'
+            || ($host !== '' && strlen($host) > 10 && substr($host, -10) === '.localhost')
+            || $host === '::1'
+            || strpos($host, '127.') === 0;
+
+        /**
+         * hCaptcha does not support production sitekeys on localhost/loopback
+         * hostnames. Keep the official hCaptcha test pair restricted to local
+         * WordPress URLs so production always uses the saved real credentials.
+         */
+        return (bool) apply_filters('wp_newslatter_campaigns_hcaptcha_local_test_mode', $is_local, $host);
+    }
+
     private function wpbb_captcha_config() {
-        if (!function_exists('wpbb_get_option')) return array('provider'=>'', 'site_key'=>'', 'secret_key'=>'');
+        if (!function_exists('wpbb_get_option')) return array('provider'=>'', 'site_key'=>'', 'secret_key'=>'', 'local_test'=>false);
         $h_enabled = (bool) wpbb_get_option('hcaptcha_enabled', 0);
         $h_site = $h_enabled ? trim((string) wpbb_get_option('hcaptcha_site_key', '')) : '';
         $h_secret = $h_enabled ? trim((string) wpbb_get_option('hcaptcha_secret_key', '')) : '';
-        if ($h_site && $h_secret) return array('provider'=>'hcaptcha', 'site_key'=>$h_site, 'secret_key'=>$h_secret);
+        if ($h_site && $h_secret) {
+            $local_test = $this->hcaptcha_uses_local_test_credentials();
+            if ($local_test) {
+                // Official Publisher/Pro integration-test credentials from hCaptcha.
+                $h_site = '10000000-ffff-ffff-ffff-000000000001';
+                $h_secret = '0x0000000000000000000000000000000000000000';
+            }
+            return array('provider'=>'hcaptcha', 'site_key'=>$h_site, 'secret_key'=>$h_secret, 'local_test'=>$local_test);
+        }
         $r_enabled = (bool) wpbb_get_option('recaptcha_enabled', 0);
         $r_site = $r_enabled ? trim((string) wpbb_get_option('recaptcha_site_key', '')) : '';
         $r_secret = $r_enabled ? trim((string) wpbb_get_option('recaptcha_secret_key', '')) : '';
-        if ($r_site && $r_secret) return array('provider'=>'recaptcha', 'site_key'=>$r_site, 'secret_key'=>$r_secret);
-        return array('provider'=>'', 'site_key'=>'', 'secret_key'=>'');
+        if ($r_site && $r_secret) return array('provider'=>'recaptcha', 'site_key'=>$r_site, 'secret_key'=>$r_secret, 'local_test'=>false);
+        return array('provider'=>'', 'site_key'=>'', 'secret_key'=>'', 'local_test'=>false);
     }
 
     private function page_has_ws_form() {
@@ -1747,7 +1771,7 @@ final class WP_Newslatter_Campaigns_Plugin {
             $defer_hcaptcha_to_ws_form = $this->page_has_ws_form();
             if (!$defer_hcaptcha_to_ws_form) {
                 if (!wp_script_is('hcaptcha-api', 'registered') && !wp_script_is('hcaptcha-api', 'enqueued')) {
-                    wp_enqueue_script('hcaptcha-api', 'https://js.hcaptcha.com/1/api.js?render=explicit&onload=wpncNewsletterCaptchaReady', array(), null, true);
+                    wp_enqueue_script('hcaptcha-api', 'https://js.hcaptcha.com/1/api.js?render=explicit&onload=wpncNewsletterCaptchaReady&recaptchacompat=off', array(), null, true);
                 } else {
                     wp_enqueue_script('hcaptcha-api');
                 }
@@ -1783,6 +1807,10 @@ final class WP_Newslatter_Campaigns_Plugin {
                 'invalid' => __('Please enter a valid email address.', 'wp-newslatter-campaigns'),
                 'notConnected' => __('Newsletter form is not connected. Please refresh the page and try again.', 'wp-newslatter-campaigns'),
                 'captcha' => __('Please complete the captcha check.', 'wp-newslatter-campaigns'),
+                'captchaTitle' => __('Verify you are human', 'wp-newslatter-campaigns'),
+                'captchaHelp' => __('Complete the hCaptcha check to subscribe.', 'wp-newslatter-campaigns'),
+                'captchaCancel' => __('Close verification', 'wp-newslatter-campaigns'),
+                'captchaExpired' => __('The verification expired. Please try again.', 'wp-newslatter-campaigns'),
                 'privacy' => __('Please accept the privacy consent.', 'wp-newslatter-campaigns'),
             ),
         ));
@@ -1792,7 +1820,7 @@ final class WP_Newslatter_Campaigns_Plugin {
         $captcha = $this->wpbb_captcha_config();
         if (empty($captcha['provider']) || empty($captcha['site_key'])) return '';
         if ($captcha['provider'] === 'hcaptcha') {
-            return '<div class="wp-newslatter-campaigns-captcha"><div data-wpnc-hcaptcha data-sitekey="' . esc_attr($captcha['site_key']) . '" data-size="invisible"></div></div><input type="hidden" name="wpbb_captcha_provider" value="hcaptcha"><input type="hidden" name="wpnc_hcaptcha_response" value="">';
+            return '<div class="wp-newslatter-campaigns-captcha"><div data-wpnc-hcaptcha data-sitekey="' . esc_attr($captcha['site_key']) . '" data-size="normal" data-mode="modal"></div></div><input type="hidden" name="wpbb_captcha_provider" value="hcaptcha"><input type="hidden" name="wpnc_hcaptcha_response" value="">';
         }
         return '<div class="wp-newslatter-campaigns-captcha"><div class="g-recaptcha" data-sitekey="' . esc_attr($captcha['site_key']) . '"></div></div><input type="hidden" name="wpbb_captcha_provider" value="recaptcha">';
     }
@@ -1806,10 +1834,46 @@ final class WP_Newslatter_Campaigns_Plugin {
             $token = isset($_POST['wpnc_hcaptcha_response']) ? sanitize_text_field(wp_unslash($_POST['wpnc_hcaptcha_response'])) : '';
             if (!$token && isset($_POST['h-captcha-response'])) $token = sanitize_text_field(wp_unslash($_POST['h-captcha-response']));
             if (!$token) return new WP_Error('wp_newslatter_campaigns_hcaptcha_missing', __('Please complete the hCaptcha challenge.', 'wp-newslatter-campaigns'));
-            $response = wp_remote_post('https://hcaptcha.com/siteverify', array('timeout'=>12, 'body'=>array('secret'=>$captcha['secret_key'], 'response'=>$token, 'remoteip'=>$_SERVER['REMOTE_ADDR'] ?? '')));
-            if (is_wp_error($response)) return $response;
+            $response = wp_remote_post('https://api.hcaptcha.com/siteverify', array(
+                'timeout' => 12,
+                'body' => array(
+                    'secret' => $captcha['secret_key'],
+                    'response' => $token,
+                    'remoteip' => $_SERVER['REMOTE_ADDR'] ?? '',
+                    'sitekey' => $captcha['site_key'],
+                ),
+            ));
+            if (is_wp_error($response)) {
+                return new WP_Error('wp_newslatter_campaigns_hcaptcha_unavailable', __('Captcha verification is temporarily unavailable. Please try again.', 'wp-newslatter-campaigns'));
+            }
+            $status = (int) wp_remote_retrieve_response_code($response);
             $body = json_decode((string) wp_remote_retrieve_body($response), true);
-            if (empty($body['success'])) return new WP_Error('wp_newslatter_campaigns_hcaptcha_failed', __('hCaptcha verification failed. Please try again.', 'wp-newslatter-campaigns'));
+            if ($status < 200 || $status >= 300 || !is_array($body)) {
+                return new WP_Error('wp_newslatter_campaigns_hcaptcha_unavailable', __('Captcha verification is temporarily unavailable. Please try again.', 'wp-newslatter-campaigns'));
+            }
+            if (empty($body['success'])) {
+                $error_codes = !empty($body['error-codes']) && is_array($body['error-codes'])
+                    ? array_values(array_filter(array_map('sanitize_key', $body['error-codes'])))
+                    : array();
+                if (defined('WP_DEBUG') && WP_DEBUG && function_exists('error_log')) {
+                    error_log('[WP Newsletter Campaigns] hCaptcha siteverify rejected the token. Errors: ' . implode(', ', $error_codes));
+                }
+
+                $configuration_errors = array('missing-input-secret', 'invalid-input-secret', 'sitekey-secret-mismatch', 'not-using-dummy-passcode');
+                if (array_intersect($configuration_errors, $error_codes)) {
+                    return new WP_Error(
+                        'wp_newslatter_campaigns_hcaptcha_configuration',
+                        __('hCaptcha configuration could not be verified. Please check the site key and secret key.', 'wp-newslatter-campaigns'),
+                        array('hcaptcha_errors' => $error_codes)
+                    );
+                }
+
+                return new WP_Error(
+                    'wp_newslatter_campaigns_hcaptcha_failed',
+                    __('Please complete the hCaptcha check again and resubmit.', 'wp-newslatter-campaigns'),
+                    array('hcaptcha_errors' => $error_codes)
+                );
+            }
         }
         if ($provider === 'recaptcha') {
             $token = isset($_POST['g-recaptcha-response']) ? sanitize_text_field(wp_unslash($_POST['g-recaptcha-response'])) : '';
@@ -1876,7 +1940,18 @@ final class WP_Newslatter_Campaigns_Plugin {
     public function handle_ajax_subscribe() {
         $result = $this->process_subscribe_request();
         if (is_wp_error($result)) {
-            wp_send_json_error(array('message' => $result->get_error_message()), 422);
+            $data = array('message' => $result->get_error_message());
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                $data['code'] = $result->get_error_code();
+                $error_data = $result->get_error_data();
+                if (is_array($error_data) && !empty($error_data['hcaptcha_errors'])) {
+                    $data['hcaptcha_errors'] = array_values($error_data['hcaptcha_errors']);
+                }
+            }
+            // Return a valid AJAX response envelope with HTTP 200. Validation
+            // errors are application-level failures and should not surface as a
+            // red network/422 error in the browser console.
+            wp_send_json_error($data);
         }
         $message = !empty($result['already_subscribed'])
             ? __("You're already subscribed. Thanks for being part of the WordPress newsletter list!", 'wp-newslatter-campaigns')

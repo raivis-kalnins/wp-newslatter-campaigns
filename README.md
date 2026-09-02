@@ -4,6 +4,20 @@ Native WordPress newsletter system, packaged as a single plugin to replace the c
 
 ## Version
 
+### 2.1.2
+
+- Detects `localhost`, `*.localhost`, `127.x.x.x`, and `::1` WordPress URLs and uses hCaptcha's official integration-test sitekey/secret only on those local URLs; saved production credentials remain untouched and are used everywhere else.
+- Fixes local newsletter subscriptions such as `wpbase.localhost`, where hCaptcha production tokens are rejected by design even after the challenge succeeds.
+- Logs hCaptcha `siteverify` error codes when `WP_DEBUG` is enabled and distinguishes key/secret configuration errors from normal rejected/expired tokens.
+- Returns newsletter validation failures in the normal WordPress AJAX JSON envelope instead of HTTP 422, avoiding misleading failed-network errors in the browser console.
+
+### 2.1.1
+
+- Waits for the hCaptcha explicit API `onload` callback before rendering newsletter widgets, preventing the `should not render before js api is fully loaded` race.
+- Uses the canonical `api.hcaptcha.com/siteverify` endpoint and includes the configured site key in server-side verification.
+- Keeps verification-service/network failures separate from a failed hCaptcha challenge so the subscribe form no longer reports the misleading generic verification message for transport failures.
+- Uses `recaptchacompat=off` consistently for the newsletter-owned hCaptcha loader.
+
 ### 2.1.0
 
 - Removes the remaining legacy brand references and switches the admin accent to classic WordPress blue.
@@ -432,3 +446,10 @@ An accepted status means the configured mail transport accepted the message. It 
 - Builder output is responsive, table-based email HTML and includes personalisation plus an unsubscribe token.
 - Added optional newsletter-only custom SMTP. It is disabled by default; when disabled the plugin leaves `wp_mail()`/PHPMailer to the existing WordPress mail stack.
 - Added a custom SMTP test action and kept recipient-level delivery logs in Settings.
+
+
+## 2.1.3
+
+- Newsletter hCaptcha now opens in an accessible modal when the user submits the subscription form.
+- hCaptcha uses a visible normal widget (compact on very narrow screens) instead of an invisible auto-executed check.
+- The form is submitted only after the modal hCaptcha callback returns a token.

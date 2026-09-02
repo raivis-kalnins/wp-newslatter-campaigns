@@ -4,6 +4,133 @@
   var config = window.wpncNewsletterFrontend || {};
   var messages = config.messages || {};
   var hcaptchaFallbackRequested = false;
+  var openCaptchaForm = null;
+
+  function captchaModalMode(form) {
+    var box = captchaBox(form);
+    return !!(box && (box.getAttribute('data-mode') || '') === 'modal');
+  }
+
+  function captchaTheme() {
+    var root = document.documentElement;
+    var body = document.body;
+    return (root && root.classList.contains('is-dark-theme')) ||
+      (body && body.classList.contains('is-dark-theme'))
+      ? 'dark'
+      : 'light';
+  }
+
+  function modalCaptchaSize() {
+    return window.innerWidth && window.innerWidth < 360 ? 'compact' : 'normal';
+  }
+
+  function ensureCaptchaModal(form) {
+    if (form.wpncCaptchaModal && document.body.contains(form.wpncCaptchaModal)) {
+      return form.wpncCaptchaModal;
+    }
+
+    var originalHost = form.querySelector('[data-wpnc-hcaptcha][data-sitekey], .wp-newslatter-campaigns-captcha [data-sitekey]');
+    if (!originalHost) return null;
+
+    form.wpncHcaptchaHost = originalHost;
+
+    var modal = document.createElement('div');
+    var modalId = 'wpnc-hcaptcha-modal-' + Math.random().toString(36).slice(2, 10);
+    var titleId = modalId + '-title';
+    var helpId = modalId + '-help';
+    modal.className = 'wpnc-hcaptcha-modal';
+    modal.hidden = true;
+    modal.setAttribute('aria-hidden', 'true');
+    modal.innerHTML =
+      '<div class="wpnc-hcaptcha-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="' + titleId + '" aria-describedby="' + helpId + '">' +
+        '<button type="button" class="wpnc-hcaptcha-modal__close" aria-label="' + escapeHtml(messages.captchaCancel || 'Close verification') + '">&times;</button>' +
+        '<div class="wpnc-hcaptcha-modal__heading">' +
+          '<h2 id="' + titleId + '">' + escapeHtml(messages.captchaTitle || 'Verify you are human') + '</h2>' +
+          '<p id="' + helpId + '">' + escapeHtml(messages.captchaHelp || 'Complete the hCaptcha check to subscribe.') + '</p>' +
+        '</div>' +
+        '<div class="wpnc-hcaptcha-modal__widget"></div>' +
+        '<div class="wpnc-hcaptcha-modal__status" role="status" aria-live="polite"></div>' +
+      '</div>';
+
+    var widgetWrap = modal.querySelector('.wpnc-hcaptcha-modal__widget');
+    widgetWrap.appendChild(originalHost);
+    document.body.appendChild(modal);
+    form.wpncCaptchaModal = modal;
+
+    var closeButton = modal.querySelector('.wpnc-hcaptcha-modal__close');
+    closeButton.addEventListener('click', function () {
+      closeCaptchaModal(form, true);
+    });
+    modal.addEventListener('click', function (event) {
+      if (event.target === modal) closeCaptchaModal(form, true);
+    });
+    modal.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeCaptchaModal(form, true);
+      }
+    });
+
+    return modal;
+  }
+
+  function escapeHtml(value) {
+    var div = document.createElement('div');
+    div.textContent = value || '';
+    return div.innerHTML;
+  }
+
+  function setCaptchaModalStatus(form, text) {
+    var modal = form && form.wpncCaptchaModal;
+    if (!modal) return;
+    var status = modal.querySelector('.wpnc-hcaptcha-modal__status');
+    if (status) status.textContent = text || '';
+  }
+
+  function openCaptchaModalForForm(form) {
+    var modal = ensureCaptchaModal(form);
+    if (!modal) return false;
+
+    if (openCaptchaForm && openCaptchaForm !== form) {
+      closeCaptchaModal(openCaptchaForm, false);
+    }
+
+    openCaptchaForm = form;
+    form.wpncCaptchaPreviousFocus = document.activeElement;
+    setCaptchaModalStatus(form, '');
+    modal.hidden = false;
+    modal.setAttribute('aria-hidden', 'false');
+    document.documentElement.classList.add('wpnc-hcaptcha-modal-open');
+    if (document.body) document.body.classList.add('wpnc-hcaptcha-modal-open');
+
+    window.requestAnimationFrame(function () {
+      var closeButton = modal.querySelector('.wpnc-hcaptcha-modal__close');
+      if (closeButton) closeButton.focus();
+    });
+    return true;
+  }
+
+  function closeCaptchaModal(form, cancelled) {
+    if (!form || !form.wpncCaptchaModal) return;
+    var modal = form.wpncCaptchaModal;
+    modal.hidden = true;
+    modal.setAttribute('aria-hidden', 'true');
+    document.documentElement.classList.remove('wpnc-hcaptcha-modal-open');
+    if (document.body) document.body.classList.remove('wpnc-hcaptcha-modal-open');
+    if (openCaptchaForm === form) openCaptchaForm = null;
+
+    if (cancelled) {
+      resetCaptcha(form);
+      setBusy(form, false);
+      setCaptchaModalStatus(form, '');
+    }
+
+    var previous = form.wpncCaptchaPreviousFocus;
+    if (previous && typeof previous.focus === 'function') {
+      try { previous.focus({ preventScroll: true }); } catch (e) { try { previous.focus(); } catch (ignore) {} }
+    }
+    form.wpncCaptchaPreviousFocus = null;
+  }
 
   function allForms() {
     return Array.prototype.slice.call(
@@ -81,6 +208,7 @@
   }
 
   function captchaBox(form) {
+    if (form && form.wpncHcaptchaHost) return form.wpncHcaptchaHost;
     return form.querySelector('[data-wpnc-hcaptcha][data-sitekey], .wp-newslatter-campaigns-captcha [data-sitekey]');
   }
 
@@ -91,6 +219,7 @@
 
   function captchaSize(form) {
     var box = captchaBox(form);
+    if (box && (box.getAttribute('data-mode') || '') === 'modal') return modalCaptchaSize();
     return box ? (box.getAttribute('data-size') || 'invisible') : 'invisible';
   }
 
@@ -105,7 +234,9 @@
     host.setAttribute('data-wpnc-hcaptcha', '1');
     host.setAttribute('data-sitekey', captchaSiteKey(form));
     host.setAttribute('data-size', captchaSize(form));
+    if (captchaModalMode(form)) host.setAttribute('data-mode', 'modal');
     if (box && box.parentNode) box.parentNode.replaceChild(host, box);
+    form.wpncHcaptchaHost = host;
     delete form.dataset.wpncHcaptchaWidget;
     delete form.dataset.wpncHcaptchaRendered;
     return host;
@@ -121,9 +252,25 @@
     delete form.dataset.wpncCaptchaSubmitting;
   }
 
+  function newsletterHCaptchaUsesOnload() {
+    if (hcaptchaFallbackRequested) return true;
+    return !!document.querySelector(
+      'script[src*="js.hcaptcha.com/1/api.js"][src*="onload=wpncNewsletterCaptchaReady"]'
+    );
+  }
+
   function hcaptchaIsReady() {
     if (!window.hcaptcha || typeof window.hcaptcha.render !== 'function') return false;
-    if (config.deferHCaptchaToWsForm && hasWsFormHCaptcha()) {
+
+    // hCaptcha exposes window.hcaptcha before its explicit API is fully ready.
+    // When our loader uses an onload callback, never call render() until that
+    // callback has fired; doing so triggers hCaptcha's "should not render before
+    // js api is fully loaded" warning and can produce an unusable widget/token.
+    if (newsletterHCaptchaUsesOnload()) {
+      return window.wpncNewsletterHCaptchaLoaded === true;
+    }
+
+    if (config.deferHCaptchaToWsForm) {
       return window.wsf_hcaptcha_loaded === true || window.wpncNewsletterHCaptchaLoaded === true;
     }
     return true;
@@ -139,10 +286,13 @@
     var options = {
       sitekey: captchaSiteKey(form),
       size: captchaSize(form),
+      theme: captchaTheme(),
       callback: function (token) {
         if (!isNewsletterForm(form)) return;
         setCaptchaToken(form, token || '');
         delete form.dataset.wpncCaptchaPending;
+        setCaptchaModalStatus(form, '');
+        closeCaptchaModal(form, false);
         if (form.dataset.wpncCaptchaSubmitting === '1') return;
         form.dataset.wpncCaptchaSubmitting = '1';
         submitAjax(form);
@@ -152,17 +302,20 @@
         delete form.dataset.wpncCaptchaSubmitting;
         clearCaptchaToken(form);
         setBusy(form, false);
-        setMessage(form, messages.captcha || 'Please complete the captcha check.', 'error');
+        var errorText = messages.captcha || 'Please complete the captcha check.';
+        setCaptchaModalStatus(form, errorText);
+        setMessage(form, errorText, 'error');
       },
       'expired-callback': function () {
         resetCaptcha(form);
         setBusy(form, false);
+        setCaptchaModalStatus(form, messages.captchaExpired || 'The verification expired. Please try again.');
       },
       'close-callback': function () {
         delete form.dataset.wpncCaptchaPending;
         if (!hiddenInput(form, 'wpnc_hcaptcha_response').value) {
           setBusy(form, false);
-          setMessage(form, messages.captcha || 'Please complete the captcha check.', 'error');
+          setCaptchaModalStatus(form, messages.captcha || 'Please complete the captcha check.');
         }
       }
     };
@@ -190,7 +343,8 @@
   function renderHCaptchas() {
     allForms().forEach(function (form) {
       if (form.querySelector('[name="wpbb_captcha_provider"][value="hcaptcha"]')) {
-        renderHCaptchaForForm(form);
+        if (captchaModalMode(form)) ensureCaptchaModal(form);
+        else renderHCaptchaForForm(form);
       }
     });
   }
@@ -334,7 +488,22 @@
   }
 
   function executeHCaptcha(form) {
-    if (!window.hcaptcha || typeof window.hcaptcha.execute !== 'function') return false;
+    if (!window.hcaptcha || typeof window.hcaptcha.render !== 'function') return false;
+
+    if (captchaModalMode(form)) {
+      if (!openCaptchaModalForForm(form)) return false;
+      if (!renderHCaptchaForForm(form)) {
+        closeCaptchaModal(form, false);
+        return false;
+      }
+      form.dataset.wpncCaptchaPending = '1';
+      delete form.dataset.wpncCaptchaSubmitting;
+      clearCaptchaToken(form);
+      setBusy(form, true);
+      return true;
+    }
+
+    if (typeof window.hcaptcha.execute !== 'function') return false;
     if (!renderHCaptchaForForm(form)) return false;
 
     var id = widgetId(form);
@@ -425,6 +594,9 @@
       form.setAttribute('novalidate', 'novalidate');
       form.noValidate = true;
       hiddenInput(form, 'wpnc_hcaptcha_response');
+      if (form.querySelector('[name="wpbb_captcha_provider"][value="hcaptcha"]') && captchaModalMode(form)) {
+        ensureCaptchaModal(form);
+      }
       if (!form.querySelector('.wp-newslatter-campaigns-message')) {
         var message = document.createElement('div');
         message.className = 'wp-newslatter-campaigns-message';

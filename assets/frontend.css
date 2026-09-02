@@ -69,3 +69,147 @@
   gap: 8px;
   font-size: 13px;
 }
+
+
+/* Newsletter hCaptcha modal */
+html.wpnc-hcaptcha-modal-open,
+body.wpnc-hcaptcha-modal-open {
+  overflow: hidden;
+}
+
+.wp-newslatter-campaigns-captcha:empty {
+  display: none;
+}
+
+.wpnc-hcaptcha-modal[hidden] {
+  display: none;
+}
+
+.wpnc-hcaptcha-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.66);
+  backdrop-filter: blur(3px);
+}
+
+.wpnc-hcaptcha-modal *,
+.wpnc-hcaptcha-modal *::before,
+.wpnc-hcaptcha-modal *::after {
+  box-sizing: border-box;
+}
+
+.wpnc-hcaptcha-modal__dialog {
+  position: relative;
+  width: min(390px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  padding: 28px;
+  border: 1px solid #d7dce5;
+  border-radius: 18px;
+  background: #fff;
+  color: #111827;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+  text-align: center;
+}
+
+.wpnc-hcaptcha-modal__heading h2 {
+  margin: 0 42px 8px;
+  color: inherit;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.wpnc-hcaptcha-modal__heading p {
+  margin: 0 0 20px;
+  color: #667085;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.wpnc-hcaptcha-modal__close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #d7dce5;
+  border-radius: 10px;
+  background: #fff;
+  color: #111827;
+  font: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wpnc-hcaptcha-modal__close:hover,
+.wpnc-hcaptcha-modal__close:focus-visible {
+  border-color: #98a2b3;
+  outline: 2px solid transparent;
+  box-shadow: 0 0 0 3px rgba(34, 113, 177, 0.18);
+}
+
+.wpnc-hcaptcha-modal__widget {
+  display: flex;
+  min-height: 78px;
+  align-items: center;
+  justify-content: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.wpnc-hcaptcha-modal__status {
+  min-height: 18px;
+  margin-top: 12px;
+  color: #b42318;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.is-dark-theme .wpnc-hcaptcha-modal__dialog,
+html.is-dark-theme .wpnc-hcaptcha-modal__dialog,
+body.is-dark-theme .wpnc-hcaptcha-modal__dialog {
+  border-color: #344054;
+  background: #101828;
+  color: #f9fafb;
+}
+
+.is-dark-theme .wpnc-hcaptcha-modal__heading p,
+html.is-dark-theme .wpnc-hcaptcha-modal__heading p,
+body.is-dark-theme .wpnc-hcaptcha-modal__heading p {
+  color: #cbd5e1;
+}
+
+.is-dark-theme .wpnc-hcaptcha-modal__close,
+html.is-dark-theme .wpnc-hcaptcha-modal__close,
+body.is-dark-theme .wpnc-hcaptcha-modal__close {
+  border-color: #475467;
+  background: #1d2939;
+  color: #f9fafb;
+}
+
+@media (max-width: 359.98px) {
+  .wpnc-hcaptcha-modal {
+    padding: 12px;
+  }
+
+  .wpnc-hcaptcha-modal__dialog {
+    width: calc(100vw - 24px);
+    padding: 24px 18px;
+  }
+
+  .wpnc-hcaptcha-modal__widget {
+    min-height: 144px;
+  }
+}
